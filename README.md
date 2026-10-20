@@ -115,18 +115,21 @@ systemctl --user enable --now gdrive-sync.service
 
 ## Google Cloud OAuth2 Setup Guide
 
+BearSync uses your own personal Google Cloud OAuth2 desktop credentials to communicate directly with Google Drive without any third-party intermediaries.
+
+For detailed step-by-step instructions with pictures and troubleshooting, see [docs/OAUTH_SETUP.md](docs/OAUTH_SETUP.md).
+
+### Quick Summary:
 1. Open the [Google Cloud Console](https://console.cloud.google.com/).
-2. Create a new project (e.g., `BearSync-Personal`) and enable the **Google Drive API**.
-3. Navigate to **APIs & Services → OAuth consent screen**:
-   - Choose **External** (or Internal for Workspace), add the `.../auth/drive` scope, and add your Google account under **Test users**.
-4. Navigate to **APIs & Services → Credentials**:
-   - Click **Create Credentials → OAuth client ID**.
+2. Create a new project (e.g., `BearSync`) and enable the **Google Drive API** in APIs & Services &rarr; Library.
+3. In **APIs & Services → OAuth consent screen**:
+   - Choose **External**, name the app `BearSync`, and under **Test users** add your Google email address.
+4. In **APIs & Services → Credentials**:
+   - Click **+ Create Credentials → OAuth client ID**.
    - Application type: **Desktop app**.
-   - Download the JSON file (`client_secret_*.json`).
-5. Launch `gdrive-sync` (or click **Re-run OAuth Setup Wizard...** in Preferences):
-   - Select your local sync folder (e.g., `~/GoogleDrive`).
-   - Load or paste the contents of `client_secret.json` and click **Authenticate via Browser (Loopback OAuth2)**.
-   - Your token is cached with `0600` permissions in `~/.config/gdrive-sync/token.json`.
+   - Name: `BearSync Desktop`.
+5. Enter your **Client ID** and **Client Secret** into BearSync's Setup Wizard (or click **Load client_secret.json...**), then click **Sign in with Google**.
+   - Your session token is saved securely with `0600` permissions in `~/.config/gdrive-sync/token.json`.
 
 ---
 

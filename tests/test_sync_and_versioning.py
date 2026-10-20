@@ -402,3 +402,20 @@ def test_autostart_logic(tmp_path: Path, monkeypatch=None) -> None:
         auto.AUTOSTART_DIR = old_dir
 
 
+def test_oauth_credentials_management(tmp_path: Path) -> None:
+    from src.drive_api import DriveClient
+
+    client = DriveClient(config_dir=tmp_path / "gdrive-sync")
+    assert not client.has_client_credentials()
+
+    creds_path = client.save_client_credentials("my-test-client-id", "my-test-client-secret")
+    assert creds_path.is_file()
+    assert client.has_client_credentials()
+
+    info = client.get_client_credentials_info()
+    assert info["client_id"] == "my-test-client-id"
+    assert info["client_secret"] == "my-test-client-secret"
+    assert "..." in info["masked_secret"]
+
+
+

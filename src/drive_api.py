@@ -24,11 +24,11 @@ DRIVE_FILE_FIELDS = (
     "id, name, mimeType, parents, trashed, modifiedTime, sha256Checksum, md5Checksum, size, appProperties"
 )
 
-# Built-in BearSync Desktop OAuth2 client configuration enabling one-click browser sign-in
+# Default OAuth2 client configuration template (populated from ~/.config/gdrive-sync/credentials.json or env vars)
 DEFAULT_OAUTH_CLIENT_CONFIG: Dict[str, Any] = {
     "installed": {
-        "client_id": "your-client-id.apps.googleusercontent.com",
-        "client_secret": "your-client-secret",
+        "client_id": os.environ.get("BEARSYNC_CLIENT_ID", ""),
+        "client_secret": os.environ.get("BEARSYNC_CLIENT_SECRET", ""),
         "auth_uri": "https://accounts.google.com/o/oauth2/auth",
         "token_uri": "https://oauth2.googleapis.com/token",
         "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
@@ -174,6 +174,63 @@ class DriveClient:
         os.chmod(self.credentials_path, 0o600)
         return self.credentials_path
 
+    def has_client_credentials(self) -> bool:
+        """Return True if credentials.json exists or valid environment variables are set."""
+        if self.credentials_path.is_file():
+            return True
+        cid = os.environ.get("BEARSYNC_CLIENT_ID", "").strip()
+        sec = os.environ.get("BEARSYNC_CLIENT_SECRET", "").strip()
+        return bool(cid and sec)
+
+    def get_client_credentials_info(self) -> Dict[str, str]:
+        """Return configured client_id and masked secret, if available."""
+        if self.credentials_path.is_file():
+            try:
+                data = json.loads(self.credentials_path.read_text(encoding="utf-8"))
+                cfg = data.get("installed") or data.get("web") or {}
+                cid = cfg.get("client_id", "")
+                sec = cfg.get("client_secret", "")
+                masked_sec = (sec[:6] + "..." + sec[-4:]) if len(sec) > 10 else ("*" * len(sec))
+                return {
+                    "client_id": cid,
+                    "client_secret": sec,
+                    "masked_secret": masked_sec,
+                    "source": "file",
+                }
+            except Exception as exc:
+                logger.warning("Failed to parse %s: %s", self.credentials_path, exc)
+
+        cid = os.environ.get("BEARSYNC_CLIENT_ID", "").strip()
+        sec = os.environ.get("BEARSYNC_CLIENT_SECRET", "").strip()
+        if cid and sec:
+            masked_sec = (sec[:6] + "..." + sec[-4:]) if len(sec) > 10 else ("*" * len(sec))
+            return {
+                "client_id": cid,
+                "client_secret": sec,
+                "masked_secret": masked_sec,
+                "source": "env",
+            }
+        return {"client_id": "", "client_secret": "", "masked_secret": "", "source": "none"}
+
+    def save_client_credentials(self, client_id: str, client_secret: str) -> Path:
+        """Construct and persist standard Google OAuth installed app configuration."""
+        client_id = client_id.strip()
+        client_secret = client_secret.strip()
+        if not client_id or not client_secret:
+            raise DriveAPIError("Client ID and Client Secret cannot be empty.")
+
+        payload = {
+            "installed": {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                "redirect_uris": ["http://localhost", "http://127.0.0.1"],
+            }
+        }
+        return self.save_client_credentials_json(json.dumps(payload, indent=2))
+
     def authenticate(self, interactive: bool = True, open_browser: bool = True) -> bool:
         """Authenticate with Google Drive API v3 using cached token or loopback OAuth2."""
         if self._service is not None:
@@ -215,9 +272,26 @@ class DriveClient:
                     str(self.credentials_path), SCOPES
                 )
             else:
-                flow = InstalledAppFlow.from_client_config(
-                    DEFAULT_OAUTH_CLIENT_CONFIG, SCOPES
-                )
+                cid = os.environ.get("BEARSYNC_CLIENT_ID", "").strip()
+                sec = os.environ.get("BEARSYNC_CLIENT_SECRET", "").strip()
+                if cid and sec:
+                    config = {
+                        "installed": {
+                            "client_id": cid,
+                            "client_secret": sec,
+                            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                            "token_uri": "https://oauth2.googleapis.com/token",
+                            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                            "redirect_uris": ["http://localhost", "http://127.0.0.1"],
+                        }
+                    }
+                    flow = InstalledAppFlow.from_client_config(config, SCOPES)
+                else:
+                    raise DriveAPIError(
+                        "Google OAuth Client ID & Secret not configured.\n\n"
+                        "Please enter your Google Cloud credentials in the Setup Wizard "
+                        "or load your client_secret.json file."
+                    )
             creds = flow.run_local_server(
                 host="127.0.0.1",
                 port=0,
