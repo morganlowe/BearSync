@@ -107,8 +107,11 @@ class BearSyncApp(QObject):
             self.controller.enqueue_pair_local_changes
         )
 
-        # Controller -> Tray
+        # Controller -> Tray & live progress panel
         self.controller.state_changed.connect(self.tray.update_state)
+        self.controller.state_changed.connect(self.preferences_dialog.on_sync_state)
+        self.controller.progress_updated.connect(self.preferences_dialog.on_sync_progress)
+        self.controller.activity_logged.connect(self.preferences_dialog.append_activity)
         self.controller.conflict_detected.connect(self._on_conflicts_resolved)
 
         # Tray actions

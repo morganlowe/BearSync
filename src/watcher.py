@@ -31,10 +31,21 @@ DEFAULT_DEBOUNCE_SECONDS = 3.0
 IGNORED_SUFFIXES = (".part", ".tmp", ".swp", ".swo", ".crdownload", ".bak")
 IGNORED_PREFIXES = (".~", ".goutputstream-", ".#")
 IGNORED_EXACT_NAMES = {"sync_cache.db", "sync_cache.db-wal", "sync_cache.db-shm", ".DS_Store"}
+IGNORED_DIRS = {
+    VERSIONS_DIR_NAME,
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "node_modules",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+}
 
 
 def should_ignore_path(sync_root: Path, abs_path: Path) -> bool:
-    """Return True if `abs_path` is a temporary editor file, SQLite journal, or `.versions/` item."""
+    """Return True if `abs_path` is a temporary editor file, VCS/venv dir, SQLite journal, or `.versions/` item."""
     try:
         rel = abs_path.resolve().relative_to(sync_root.resolve())
     except ValueError:
@@ -44,7 +55,7 @@ def should_ignore_path(sync_root: Path, abs_path: Path) -> bool:
     if not parts:
         return True
 
-    if VERSIONS_DIR_NAME in parts:
+    if any(part in IGNORED_DIRS for part in parts):
         return True
 
     name = abs_path.name

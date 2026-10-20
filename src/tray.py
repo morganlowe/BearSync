@@ -6,8 +6,8 @@ import logging
 from pathlib import Path
 from typing import Dict, Optional
 
-from PyQt6.QtCore import QObject, Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QAction, QDesktopServices, QIcon, QPainter, QPixmap, QTransform
+from PyQt6.QtCore import QObject, QUrl, pyqtSignal
+from PyQt6.QtGui import QAction, QDesktopServices, QIcon
 from PyQt6.QtWidgets import QMenu, QSystemTrayIcon, QWidget
 
 from src.app_id import get_assets_dir
@@ -17,7 +17,12 @@ logger = logging.getLogger(__name__)
 
 
 class TrayManager(QObject):
-    """Manages the FreeDesktop StatusNotifierItem tray icon, animations, and context menu."""
+    """Manages the FreeDesktop StatusNotifierItem tray icon and context menu.
+
+    Uses static scalable 22x22 vector SVG icons per state and only updates the D-Bus
+    SNI icon when the state transitions, preventing icon flashing or geometry resizing
+    on KDE Plasma 6 Wayland panels.
+    """
 
     sync_now_requested = pyqtSignal()
     pause_toggled = pyqtSignal(bool)
@@ -35,17 +40,11 @@ class TrayManager(QObject):
         self.notifications_enabled = notifications_enabled
         self._assets_dir = get_assets_dir()
         self._icons: Dict[str, QIcon] = self._load_icons()
-        self._sync_frames: list[QIcon] = self._build_sync_animation_frames()
-        self._frame_index = 0
         self._is_paused = False
         self._current_state = SyncState.IDLE.value
 
         self._tray = QSystemTrayIcon(self._icons[SyncState.IDLE.value], self)
         self._tray.setToolTip("BearSync • Idle")
-
-        self._anim_timer = QTimer(self)
-        self._anim_timer.setInterval(180)
-        self._anim_timer.timeout.connect(self._advance_sync_animation)
 
         self._menu = QMenu(parent_widget)
         self._build_context_menu()
@@ -68,28 +67,6 @@ class TrayManager(QObject):
             else:
                 loaded[state_key] = QIcon.fromTheme("folder-cloud")
         return loaded
-
-    def _build_sync_animation_frames(self) -> list[QIcon]:
-        """Pre-render subtle opacity/badge frames for smooth low-CPU syncing animation."""
-        base_icon = self._icons.get(SyncState.SYNCING.value)
-        if base_icon is None or base_icon.isNull():
-            return []
-
-        frames: list[QIcon] = [base_icon]
-        base_pixmap = base_icon.pixmap(44, 44)
-        if base_pixmap.isNull():
-            return frames
-
-        for opacity in (0.85, 0.70, 0.85):
-            canvas = QPixmap(base_pixmap.size())
-            canvas.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(canvas)
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            painter.setOpacity(opacity)
-            painter.drawPixmap(0, 0, base_pixmap)
-            painter.end()
-            frames.append(QIcon(canvas))
-        return frames
 
     def _build_context_menu(self) -> None:
         """Build the right-click SNI context menu honoring system QPalette."""
@@ -144,22 +121,16 @@ class TrayManager(QObject):
 
     def hide(self) -> None:
         """Hide the system tray icon."""
-        self._anim_timer.stop()
         self._tray.hide()
 
     def update_state(self, state: str, message: str) -> None:
-        """Update the tray icon badge, tooltip, and status menu item."""
-        self._current_state = state
+        """Update the tray icon badge (only on state transition), tooltip, and status menu item."""
         self._status_action.setText(f"Status: {message}")
         self._tray.setToolTip(f"BearSync • {message}")
 
-        if state == SyncState.SYNCING.value:
-            self._frame_index = 0
-            if len(self._sync_frames) > 1:
-                self._anim_timer.start()
-            self._tray.setIcon(self._icons.get(state, self._icons[SyncState.IDLE.value]))
-        else:
-            self._anim_timer.stop()
+        # Only call setIcon when the state actually changes so KDE Plasma SNI never flashes/resizes
+        if state != self._current_state:
+            self._current_state = state
             icon = self._icons.get(state, self._icons[SyncState.IDLE.value])
             self._tray.setIcon(icon)
 
@@ -183,12 +154,6 @@ class TrayManager(QObject):
             return
         if self._tray.supportsMessages():
             self._tray.showMessage(title, message, icon_type, 4000)
-
-    def _advance_sync_animation(self) -> None:
-        if not self._sync_frames:
-            return
-        self._frame_index = (self._frame_index + 1) % len(self._sync_frames)
-        self._tray.setIcon(self._sync_frames[self._frame_index])
 
     def _on_pause_resume_clicked(self) -> None:
         self._is_paused = not self._is_paused

@@ -20,6 +20,8 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMessageBox,
+    QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QSpinBox,
     QTableWidget,
@@ -63,6 +65,7 @@ class PreferencesDialog(QDialog):
         self._allow_quit_cb = allow_quit_cb
         self._notified_close_to_tray = False
         self._pairs: List[SyncPair] = []
+        self._pair_status: Dict[str, str] = {}
 
         self.setWindowTitle("BearSync — Account & Folder Sync")
         self.setMinimumSize(760, 520)
@@ -115,16 +118,15 @@ class PreferencesDialog(QDialog):
 
         desc = QLabel(
             "Manage your bi-directional Local ↔ Google Drive folder sync connections. "
-            "You can sync any local directory (such as Wine/Proton prefixes or documents) "
-            "to any folder or subfolder path in Google Drive.",
+            "You can sync any local directory to any folder or subfolder path in Google Drive.",
             tab,
         )
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
-        self.pairs_table = QTableWidget(0, 4, tab)
+        self.pairs_table = QTableWidget(0, 5, tab)
         self.pairs_table.setHorizontalHeaderLabels(
-            ["Active", "Local Folder", "Google Drive Folder", "Timestamp Versioning"]
+            ["Active", "Local Folder", "Google Drive Folder", "Versioning", "Status"]
         )
         header = self.pairs_table.horizontalHeader()
         if header is not None:
@@ -132,6 +134,7 @@ class PreferencesDialog(QDialog):
             header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
             header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
             header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         self.pairs_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
         )
@@ -177,7 +180,74 @@ class PreferencesDialog(QDialog):
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
 
+        # --- Live Sync Progress & Activity Log ---
+        progress_group = QGroupBox("Sync Activity", tab)
+        progress_layout = QVBoxLayout(progress_group)
+
+        self.sync_status_label = QLabel("Idle", progress_group)
+        self.sync_status_label.setWordWrap(True)
+        progress_layout.addWidget(self.sync_status_label)
+
+        self.sync_progress_bar = QProgressBar(progress_group)
+        self.sync_progress_bar.setRange(0, 1)
+        self.sync_progress_bar.setValue(1)
+        self.sync_progress_bar.setTextVisible(True)
+        progress_layout.addWidget(self.sync_progress_bar)
+
+        self.activity_log = QPlainTextEdit(progress_group)
+        self.activity_log.setReadOnly(True)
+        self.activity_log.setMaximumBlockCount(500)
+        self.activity_log.setPlaceholderText("Uploads, downloads, and conflicts will appear here.")
+        self.activity_log.setMinimumHeight(110)
+        progress_layout.addWidget(self.activity_log)
+
+        layout.addWidget(progress_group)
+
         return tab
+
+    # --- Live progress slots (connected from SyncController in main.py) ---
+
+    def on_sync_state(self, state: str, message: str) -> None:
+        """Reflect the overall controller state in the activity panel."""
+        self.sync_status_label.setText(message)
+        if state != "syncing":
+            self.sync_progress_bar.setRange(0, 1)
+            self.sync_progress_bar.setValue(1)
+            self.sync_progress_bar.setFormat("Up to date" if state == "idle" else state.capitalize())
+
+    def on_sync_progress(self, pair_id: str, detail: str, current: int, total: int) -> None:
+        """Update the per-folder status column and the progress bar."""
+        self.sync_status_label.setText(detail)
+        if total > 0:
+            self.sync_progress_bar.setRange(0, total)
+            self.sync_progress_bar.setValue(min(current, total))
+            self.sync_progress_bar.setFormat("%v / %m files")
+        else:
+            # Indeterminate (busy) while scanning / listing
+            self.sync_progress_bar.setRange(0, 0)
+
+        if detail == "Up to date ✓":
+            status = "Up to date ✓"
+        elif total > 0:
+            status = f"Syncing {current}/{total}"
+        else:
+            status = "Scanning..."
+        if self._pair_status.get(pair_id) != status:
+            self._pair_status[pair_id] = status
+            self._update_status_cell(pair_id)
+
+    def append_activity(self, line: str) -> None:
+        self.activity_log.appendPlainText(line)
+
+    def _update_status_cell(self, pair_id: str) -> None:
+        for row, pair in enumerate(self._pairs):
+            if pair.pair_id == pair_id:
+                self.pairs_table.blockSignals(True)
+                self.pairs_table.setItem(
+                    row, 4, QTableWidgetItem(self._pair_status.get(pair_id, "—"))
+                )
+                self.pairs_table.blockSignals(False)
+                break
 
     def _build_general_tab(self) -> QWidget:
         tab = QWidget(self)
@@ -342,6 +412,10 @@ class PreferencesDialog(QDialog):
                 else "OFF"
             )
             self.pairs_table.setItem(row, 3, QTableWidgetItem(ver_label))
+            status = self._pair_status.get(pair.pair_id) or (
+                "Waiting..." if pair.enabled else "Paused"
+            )
+            self.pairs_table.setItem(row, 4, QTableWidgetItem(status))
         self.pairs_table.blockSignals(False)
 
     def _on_table_item_changed(self, item: QTableWidgetItem) -> None:

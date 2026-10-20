@@ -44,6 +44,10 @@ class SyncSummary:
     errors: int = 0
 
 
+ProgressCallback = Callable[[str, str, int, int], None]
+ActivityCallback = Callable[[str], None]
+
+
 class SyncEngine:
     """Core bi-directional differential synchronization engine.
 
@@ -113,6 +117,8 @@ class SyncEngine:
         force_full: bool = False,
         specific_local_paths: Optional[Iterable[str]] = None,
         target_pair_id: Optional[str] = None,
+        progress_cb: Optional[ProgressCallback] = None,
+        activity_cb: Optional[ActivityCallback] = None,
     ) -> SyncSummary:
         """Execute a thread-safe bi-directional synchronization cycle across all (or one) SyncPairs."""
         with self._lock:
@@ -127,6 +133,8 @@ class SyncEngine:
                     force_full=force_full,
                     specific_local_paths=specific_local_paths,
                     summary=total_summary,
+                    progress_cb=progress_cb,
+                    activity_cb=activity_cb,
                 )
 
             self.db.set_state("last_sync_epoch", str(datetime.now().timestamp()))
@@ -138,12 +146,24 @@ class SyncEngine:
         force_full: bool,
         specific_local_paths: Optional[Iterable[str]],
         summary: SyncSummary,
+        progress_cb: Optional[ProgressCallback] = None,
+        activity_cb: Optional[ActivityCallback] = None,
     ) -> None:
         pair_id = pair.pair_id
         local_root = Path(pair.local_path).expanduser().resolve()
         local_root.mkdir(parents=True, exist_ok=True)
 
-        # Build a VersioningEngine tailored to this SyncPair
+        def emit_progress(detail: str, current: int, total: int) -> None:
+            if progress_cb is not None:
+                progress_cb(pair_id, detail, current, total)
+
+        def emit_activity(msg: str) -> None:
+            if activity_cb is not None:
+                ts = datetime.now().strftime("%H:%M:%S")
+                activity_cb(f"[{ts}] {msg}")
+
+        emit_progress(f"Scanning {pair.remote_path}...", 0, 0)
+
         pair_versioning = (
             self.versioning
             if pair_id == "default"
@@ -162,64 +182,85 @@ class SyncEngine:
             if pair_id == "default":
                 root_id = self.ensure_remote_root_id()
             else:
+                emit_progress(f"Creating remote folder {pair.remote_path}...", 0, 0)
                 root_id = self.drive.ensure_remote_path(pair.remote_path)
                 pair.remote_folder_id = root_id
                 self.db.upsert_sync_pair(pair)
+                emit_activity(f"Verified Google Drive folder {pair.remote_path}")
 
         start_token = self.db.get_start_page_token(pair_id)
         if force_full or not start_token:
+            emit_progress(f"Listing remote files in {pair.remote_path}...", 0, 0)
             remote_map = self.drive.list_remote_tree(root_id)
             new_token = self.drive.get_start_page_token()
             self._reconcile_full(
                 pair_id=pair_id,
+                remote_label=pair.remote_path,
                 local_root=local_root,
                 versioning=pair_versioning,
                 root_id=root_id,
                 remote_map=remote_map,
                 summary=summary,
+                progress_cb=emit_progress,
+                activity_cb=emit_activity,
             )
             self.db.set_start_page_token(new_token, pair_id)
         else:
+            emit_progress(f"Checking Google Drive changes for {pair.remote_path}...", 0, 0)
             events, new_token = self.drive.fetch_changes(start_token)
             if events:
                 self._apply_remote_changes(
                     pair_id=pair_id,
+                    remote_label=pair.remote_path,
                     local_root=local_root,
                     versioning=pair_versioning,
                     root_id=root_id,
                     events=events,
                     summary=summary,
+                    progress_cb=emit_progress,
+                    activity_cb=emit_activity,
                 )
             self.db.set_start_page_token(new_token, pair_id)
 
             if specific_local_paths is not None:
                 self._sync_local_paths(
                     pair_id=pair_id,
+                    remote_label=pair.remote_path,
                     local_root=local_root,
                     versioning=pair_versioning,
                     root_id=root_id,
                     rel_paths=specific_local_paths,
                     summary=summary,
+                    progress_cb=emit_progress,
+                    activity_cb=emit_activity,
                 )
             else:
                 self._scan_and_push_local_delta(
                     pair_id=pair_id,
+                    remote_label=pair.remote_path,
                     local_root=local_root,
                     versioning=pair_versioning,
                     root_id=root_id,
                     summary=summary,
+                    progress_cb=emit_progress,
+                    activity_cb=emit_activity,
                 )
+
+        emit_progress("Up to date ✓", 1, 1)
 
     # --- Full Bi-Directional Reconciliation ---
 
     def _reconcile_full(
         self,
         pair_id: str,
+        remote_label: str,
         local_root: Path,
         versioning: VersioningEngine,
         root_id: str,
         remote_map: Dict[str, RemoteChangeEvent],
         summary: SyncSummary,
+        progress_cb: Callable[[str, int, int], None],
+        activity_cb: Callable[[str], None],
     ) -> None:
         cached_map = self.db.get_all_files(pair_id)
         local_files = self._scan_local_files(local_root)
@@ -227,11 +268,19 @@ class SyncEngine:
         all_paths: Set[str] = (
             set(cached_map.keys()) | set(remote_map.keys()) | set(local_files.keys())
         )
+        sorted_paths = sorted(all_paths, key=lambda p: (p.count("/"), p))
+        total_items = len(sorted_paths)
 
-        for rel_path in sorted(all_paths, key=lambda p: (p.count("/"), p)):
+        for idx, rel_path in enumerate(sorted_paths, start=1):
             if versioning.is_version_or_conflict_artifact(rel_path):
                 if Path(rel_path).parts and Path(rel_path).parts[0] == ".versions":
                     continue
+
+            progress_cb(
+                f"Syncing {remote_label}: {rel_path} ({idx}/{total_items})",
+                idx,
+                total_items,
+            )
 
             cached = cached_map.get(rel_path)
             remote = remote_map.get(rel_path)
@@ -258,6 +307,7 @@ class SyncEngine:
 
             self._reconcile_single_path(
                 pair_id=pair_id,
+                remote_label=remote_label,
                 local_root=local_root,
                 versioning=versioning,
                 root_id=root_id,
@@ -266,11 +316,13 @@ class SyncEngine:
                 cached=cached,
                 remote=remote,
                 summary=summary,
+                activity_cb=activity_cb,
             )
 
     def _reconcile_single_path(
         self,
         pair_id: str,
+        remote_label: str,
         local_root: Path,
         versioning: VersioningEngine,
         root_id: str,
@@ -279,6 +331,7 @@ class SyncEngine:
         cached: Optional[CachedFileRecord],
         remote: Optional[RemoteChangeEvent],
         summary: SyncSummary,
+        activity_cb: Callable[[str], None],
     ) -> None:
         local_exists = local_abs is not None and local_abs.is_file()
         remote_exists = remote is not None and not remote.removed
@@ -316,6 +369,7 @@ class SyncEngine:
                         summary.versions_archived += 1
                 self._upload_local_file(
                     pair_id,
+                    remote_label,
                     local_root,
                     root_id,
                     rel_path,
@@ -323,14 +377,23 @@ class SyncEngine:
                     local_sha,
                     remote.file_id,
                     summary,
+                    activity_cb,
                 )
             elif remote_changed and not local_changed:
                 self._download_remote_file(
-                    pair_id, local_root, versioning, rel_path, remote, summary
+                    pair_id,
+                    remote_label,
+                    local_root,
+                    versioning,
+                    rel_path,
+                    remote,
+                    summary,
+                    activity_cb,
                 )
             elif local_changed and remote_changed:
                 self._resolve_conflict(
                     pair_id,
+                    remote_label,
                     local_root,
                     versioning,
                     root_id,
@@ -338,6 +401,7 @@ class SyncEngine:
                     local_abs,
                     remote,
                     summary,
+                    activity_cb,
                 )
             return
 
@@ -345,11 +409,18 @@ class SyncEngine:
         if local_exists and not remote_exists and local_abs:
             if cached is not None and cached.sha256 == local_sha:
                 self._delete_local_file(
-                    pair_id, versioning, rel_path, local_abs, summary
+                    pair_id,
+                    remote_label,
+                    versioning,
+                    rel_path,
+                    local_abs,
+                    summary,
+                    activity_cb,
                 )
             else:
                 self._upload_local_file(
                     pair_id,
+                    remote_label,
                     local_root,
                     root_id,
                     rel_path,
@@ -357,6 +428,7 @@ class SyncEngine:
                     local_sha,
                     None,
                     summary,
+                    activity_cb,
                 )
             return
 
@@ -369,14 +441,17 @@ class SyncEngine:
                 self.drive.trash_file(remote.file_id)
                 self.db.delete_by_path(rel_path, pair_id)
                 summary.deleted_remote += 1
-                logger.info(
-                    "Deleted remote file after local deletion [pair=%s]: %s",
-                    pair_id,
-                    rel_path,
-                )
+                activity_cb(f"🗑️ Trashed on Google Drive: {remote_label}/{rel_path}")
             else:
                 self._download_remote_file(
-                    pair_id, local_root, versioning, rel_path, remote, summary
+                    pair_id,
+                    remote_label,
+                    local_root,
+                    versioning,
+                    rel_path,
+                    remote,
+                    summary,
+                    activity_cb,
                 )
             return
 
@@ -389,18 +464,22 @@ class SyncEngine:
     def _apply_remote_changes(
         self,
         pair_id: str,
+        remote_label: str,
         local_root: Path,
         versioning: VersioningEngine,
         root_id: str,
         events: List[RemoteChangeEvent],
         summary: SyncSummary,
+        progress_cb: Callable[[str, int, int], None],
+        activity_cb: Callable[[str], None],
     ) -> None:
         folder_id_to_rel: Dict[str, str] = {root_id: ""}
         for rec in self.db.get_all_files(pair_id).values():
             if rec.is_dir:
                 folder_id_to_rel[rec.drive_id] = rec.rel_path
 
-        for event in events:
+        total = len(events)
+        for idx, event in enumerate(events, start=1):
             cached = self.db.get_by_drive_id(event.file_id, pair_id)
 
             if event.removed or event.trashed:
@@ -410,12 +489,13 @@ class SyncEngine:
                         current_sha = compute_sha256(local_abs)
                         if current_sha == cached.sha256:
                             self._delete_local_file(
-                                pair_id, versioning, cached.rel_path, local_abs, summary
-                            )
-                        else:
-                            logger.info(
-                                "Preserving locally modified file %s despite remote removal",
+                                pair_id,
+                                remote_label,
+                                versioning,
                                 cached.rel_path,
+                                local_abs,
+                                summary,
+                                activity_cb,
                             )
                     else:
                         self.db.delete_by_drive_id(event.file_id, pair_id)
@@ -431,6 +511,12 @@ class SyncEngine:
                 rel_path = cached.rel_path
             if not rel_path:
                 continue
+
+            progress_cb(
+                f"Applying remote change in {remote_label}: {rel_path} ({idx}/{total})",
+                idx,
+                total,
+            )
 
             if event.mime_type == FOLDER_MIME_TYPE:
                 local_dir = local_root / rel_path
@@ -452,6 +538,7 @@ class SyncEngine:
             local_abs = local_root / rel_path
             self._reconcile_single_path(
                 pair_id=pair_id,
+                remote_label=remote_label,
                 local_root=local_root,
                 versioning=versioning,
                 root_id=root_id,
@@ -460,6 +547,7 @@ class SyncEngine:
                 cached=cached or self.db.get_by_path(rel_path, pair_id),
                 remote=event,
                 summary=summary,
+                activity_cb=activity_cb,
             )
 
     # --- Differential Local Changes (`inotify` & Delta Scan) ---
@@ -467,19 +555,30 @@ class SyncEngine:
     def _sync_local_paths(
         self,
         pair_id: str,
+        remote_label: str,
         local_root: Path,
         versioning: VersioningEngine,
         root_id: str,
         rel_paths: Iterable[str],
         summary: SyncSummary,
+        progress_cb: Callable[[str, int, int], None],
+        activity_cb: Callable[[str], None],
     ) -> None:
-        for raw_rel in rel_paths:
+        path_list = list(rel_paths)
+        total = len(path_list)
+        for idx, raw_rel in enumerate(path_list, start=1):
             rel_path = raw_rel.strip("/").replace("\\", "/")
             if not rel_path:
                 continue
             local_abs = local_root / rel_path
             if should_ignore_path(local_root, local_abs):
                 continue
+
+            progress_cb(
+                f"Uploading {remote_label}: {rel_path} ({idx}/{total})",
+                idx,
+                total,
+            )
 
             cached = self.db.get_by_path(rel_path, pair_id)
 
@@ -488,11 +587,7 @@ class SyncEngine:
                     self.drive.trash_file(cached.drive_id)
                     self.db.delete_by_path(rel_path, pair_id)
                     summary.deleted_remote += 1
-                    logger.info(
-                        "Propagated local deletion to Drive [pair=%s]: %s",
-                        pair_id,
-                        rel_path,
-                    )
+                    activity_cb(f"🗑️ Trashed on Google Drive: {remote_label}/{rel_path}")
                 continue
 
             if local_abs.is_dir():
@@ -522,6 +617,7 @@ class SyncEngine:
 
             self._upload_local_file(
                 pair_id=pair_id,
+                remote_label=remote_label,
                 local_root=local_root,
                 root_id=root_id,
                 rel_path=rel_path,
@@ -529,15 +625,19 @@ class SyncEngine:
                 local_sha=local_sha,
                 existing_drive_id=cached.drive_id if cached else None,
                 summary=summary,
+                activity_cb=activity_cb,
             )
 
     def _scan_and_push_local_delta(
         self,
         pair_id: str,
+        remote_label: str,
         local_root: Path,
         versioning: VersioningEngine,
         root_id: str,
         summary: SyncSummary,
+        progress_cb: Callable[[str, int, int], None],
+        activity_cb: Callable[[str], None],
     ) -> None:
         cached_map = self.db.get_all_files(pair_id)
         local_files = self._scan_local_files(local_root)
@@ -557,7 +657,15 @@ class SyncEngine:
 
         if changed_paths:
             self._sync_local_paths(
-                pair_id, local_root, versioning, root_id, changed_paths, summary
+                pair_id,
+                remote_label,
+                local_root,
+                versioning,
+                root_id,
+                changed_paths,
+                summary,
+                progress_cb,
+                activity_cb,
             )
 
     # --- Helpers for Upload, Download, Conflict Resolution, and Directory Hierarchy ---
@@ -595,6 +703,7 @@ class SyncEngine:
     def _upload_local_file(
         self,
         pair_id: str,
+        remote_label: str,
         local_root: Path,
         root_id: str,
         rel_path: str,
@@ -602,6 +711,7 @@ class SyncEngine:
         local_sha: str,
         existing_drive_id: Optional[str],
         summary: SyncSummary,
+        activity_cb: Callable[[str], None],
     ) -> None:
         parent_id = self._ensure_remote_parent_dirs(
             pair_id, local_root, root_id, rel_path
@@ -624,6 +734,7 @@ class SyncEngine:
             )
         )
         summary.uploaded += 1
+        activity_cb(f"↑ Uploaded: {rel_path} → {remote_label}")
         logger.info(
             "Uploaded local file [pair=%s] '%s' (drive_id=%s)",
             pair_id,
@@ -634,11 +745,13 @@ class SyncEngine:
     def _download_remote_file(
         self,
         pair_id: str,
+        remote_label: str,
         local_root: Path,
         versioning: VersioningEngine,
         rel_path: str,
         remote: RemoteChangeEvent,
         summary: SyncSummary,
+        activity_cb: Callable[[str], None],
     ) -> None:
         dest_abs = local_root / rel_path
         self._suppress(rel_path, True, pair_id)
@@ -665,6 +778,7 @@ class SyncEngine:
                 )
             )
             summary.downloaded += 1
+            activity_cb(f"↓ Downloaded: {remote_label}/{rel_path}")
             logger.info(
                 "Downloaded remote file [pair=%s] '%s' (drive_id=%s)",
                 pair_id,
@@ -677,10 +791,12 @@ class SyncEngine:
     def _delete_local_file(
         self,
         pair_id: str,
+        remote_label: str,
         versioning: VersioningEngine,
         rel_path: str,
         local_abs: Path,
         summary: SyncSummary,
+        activity_cb: Callable[[str], None],
     ) -> None:
         self._suppress(rel_path, True, pair_id)
         try:
@@ -689,11 +805,7 @@ class SyncEngine:
                     summary.versions_archived += 1
                 local_abs.unlink()
                 summary.deleted_local += 1
-                logger.info(
-                    "Deleted local file after remote removal [pair=%s]: %s",
-                    pair_id,
-                    rel_path,
-                )
+                activity_cb(f"🗑️ Deleted locally (removed on Drive): {rel_path}")
             self.db.delete_by_path(rel_path, pair_id)
         finally:
             self._suppress(rel_path, False, pair_id)
@@ -701,6 +813,7 @@ class SyncEngine:
     def _resolve_conflict(
         self,
         pair_id: str,
+        remote_label: str,
         local_root: Path,
         versioning: VersioningEngine,
         root_id: str,
@@ -708,6 +821,7 @@ class SyncEngine:
         local_abs: Path,
         remote: RemoteChangeEvent,
         summary: SyncSummary,
+        activity_cb: Callable[[str], None],
     ) -> None:
         """Resolve simultaneous local and remote modification by creating `filename.conflict.[timestamp].[ext]`."""
         conflict_name = versioning.format_conflict_filename(local_abs.name)
@@ -723,8 +837,10 @@ class SyncEngine:
                 rel_path,
                 conflict_rel,
             )
+            activity_cb(f"⚠️ Conflict resolved: saved {conflict_rel}")
             self._upload_local_file(
                 pair_id=pair_id,
+                remote_label=remote_label,
                 local_root=local_root,
                 root_id=root_id,
                 rel_path=conflict_rel,
@@ -732,12 +848,20 @@ class SyncEngine:
                 local_sha=conflict_sha,
                 existing_drive_id=None,
                 summary=summary,
+                activity_cb=activity_cb,
             )
         finally:
             self._suppress(conflict_rel, False, pair_id)
 
         self._download_remote_file(
-            pair_id, local_root, versioning, rel_path, remote, summary
+            pair_id,
+            remote_label,
+            local_root,
+            versioning,
+            rel_path,
+            remote,
+            summary,
+            activity_cb,
         )
         summary.conflicts_resolved += 1
 
@@ -768,6 +892,8 @@ class SyncEngine:
 class _SyncTaskRunner(QThread):
     """Background QThread executing a SyncEngine pass without blocking the Wayland UI."""
 
+    progress_reported = pyqtSignal(str, str, int, int)  # (pair_id, detail, current, total)
+    activity_reported = pyqtSignal(str)
     finished_summary = pyqtSignal(object)
     failed_error = pyqtSignal(str)
 
@@ -791,6 +917,8 @@ class _SyncTaskRunner(QThread):
                 force_full=self.force_full,
                 specific_local_paths=self.specific_paths,
                 target_pair_id=self.target_pair_id,
+                progress_cb=self.progress_reported.emit,
+                activity_cb=self.activity_reported.emit,
             )
             self.finished_summary.emit(summary)
         except Exception as exc:
@@ -802,6 +930,8 @@ class SyncController(QObject):
     """High-level Qt coordinator managing periodic polling, debounced multi-pair events, and tray state."""
 
     state_changed = pyqtSignal(str, str)
+    progress_updated = pyqtSignal(str, str, int, int)  # (pair_id, detail, current, total)
+    activity_logged = pyqtSignal(str)
     sync_completed = pyqtSignal(object)
     conflict_detected = pyqtSignal(int)
 
@@ -867,11 +997,9 @@ class SyncController(QObject):
         self._launch_if_idle()
 
     def enqueue_local_changes(self, rel_paths: List[str]) -> None:
-        """Queue debounced relative paths on the default pair."""
         self.enqueue_pair_local_changes("default", rel_paths)
 
     def enqueue_pair_local_changes(self, pair_id: str, rel_paths: List[str]) -> None:
-        """Queue debounced `inotify` relative paths for a specific SyncPair."""
         bucket = self._pending_by_pair.setdefault(pair_id, set())
         bucket.update(rel_paths)
         if not self._paused:
@@ -887,7 +1015,7 @@ class SyncController(QObject):
         self._pending_force_full = False
 
         specific_paths: Optional[List[str]] = None
-        pair_id = target_pair_id
+        pair_id = target_pair_id if isinstance(target_pair_id, str) else None
         if not force_full and self._pending_by_pair:
             pair_id, paths_set = next(iter(self._pending_by_pair.items()))
             specific_paths = sorted(paths_set)
@@ -904,10 +1032,20 @@ class SyncController(QObject):
             target_pair_id=pair_id,
             parent=self,
         )
+        runner.progress_reported.connect(self._on_runner_progress)
+        runner.activity_reported.connect(self.activity_logged.emit)
         runner.finished_summary.connect(self._on_runner_finished)
         runner.failed_error.connect(self._on_runner_failed)
         self._active_runner = runner
         runner.start()
+
+    def _on_runner_progress(
+        self, pair_id: str, detail: str, current: int, total: int
+    ) -> None:
+        self.progress_updated.emit(pair_id, detail, current, total)
+        # Avoid spamming the tray over D-Bus with per-file updates; only update on transition
+        if self._state != SyncState.SYNCING:
+            self._set_state(SyncState.SYNCING, "Syncing...")
 
     def _on_runner_finished(self, summary: SyncSummary) -> None:
         self._active_runner = None
@@ -924,11 +1062,15 @@ class SyncController(QObject):
             return
 
         timestamp = datetime.now().strftime("%H:%M:%S")
-        self._set_state(SyncState.IDLE, f"Idle • Last synced at {timestamp}")
+        self._set_state(
+            SyncState.IDLE,
+            f"Idle • Last synced at {timestamp} (↑{summary.uploaded} ↓{summary.downloaded})",
+        )
 
     def _on_runner_failed(self, error_msg: str) -> None:
         self._active_runner = None
         short_err = error_msg.splitlines()[0][:80] if error_msg else "Unknown sync error"
+        self.activity_logged.emit(f"[Error] {short_err}")
         self._set_state(SyncState.ERROR, f"Error: {short_err}")
 
     def _set_state(self, state: SyncState, message: str) -> None:
