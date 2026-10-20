@@ -19,6 +19,7 @@ from src.app_id import (
     apply_application_identity,
     configure_wayland_environment,
 )
+from src.autostart import set_autostart_enabled
 from src.db import SyncDatabase
 from src.drive_api import DriveClient
 from src.sync_engine import SyncController, SyncEngine
@@ -59,6 +60,17 @@ class BearSyncApp(QObject):
             max_versions_per_file=int(self.settings.get("max_versions_per_file", 10)),
         )
         self.drive = DriveClient()
+        self.drive.apply_network_settings(
+            proxy_mode=str(self.settings.get("proxy_mode", "system")),
+            proxy_host=str(self.settings.get("proxy_host", "")),
+            proxy_port=int(self.settings.get("proxy_port", 8080)),
+            proxy_user=str(self.settings.get("proxy_user", "")),
+            proxy_pass=str(self.settings.get("proxy_pass", "")),
+            rate_limit_upload_kbps=int(self.settings.get("rate_limit_upload_kbps", 0)),
+            rate_limit_download_kbps=int(self.settings.get("rate_limit_download_kbps", 0)),
+        )
+        if bool(self.settings.get("autostart", True)):
+            set_autostart_enabled(True)
         self.watcher = LocalFolderWatcher(
             sync_root=sync_root,
             debounce_seconds=float(self.settings.get("debounce_seconds", 3.0)),
@@ -185,6 +197,10 @@ class BearSyncApp(QObject):
         if self.args.sync_now:
             self.controller.request_full_sync()
 
+        start_min = bool(self.args.minimized or self.settings.get("start_minimized", False))
+        if not start_min and not self.args.open_folder and not self.args.preferences and not self.args.sync_now:
+            self.show_preferences()
+
     def _start_sync_services(self) -> None:
         self.watcher.set_sync_pairs(
             self.db.get_sync_pairs(),
@@ -225,6 +241,16 @@ class BearSyncApp(QObject):
         self.controller.set_poll_interval(
             int(self.settings.get("poll_interval_seconds", 60))
         )
+        self.drive.apply_network_settings(
+            proxy_mode=str(self.settings.get("proxy_mode", "system")),
+            proxy_host=str(self.settings.get("proxy_host", "")),
+            proxy_port=int(self.settings.get("proxy_port", 8080)),
+            proxy_user=str(self.settings.get("proxy_user", "")),
+            proxy_pass=str(self.settings.get("proxy_pass", "")),
+            rate_limit_upload_kbps=int(self.settings.get("rate_limit_upload_kbps", 0)),
+            rate_limit_download_kbps=int(self.settings.get("rate_limit_download_kbps", 0)),
+        )
+        set_autostart_enabled(bool(self.settings.get("autostart", True)))
         logger.info("Applied updated settings (%d sync pair(s) configured)", len(pairs))
 
     def _on_conflicts_resolved(self, count: int) -> None:

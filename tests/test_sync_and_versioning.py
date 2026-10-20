@@ -258,3 +258,147 @@ def test_multiple_sync_pairs_and_nested_remote_subfolders(tmp_path: Path) -> Non
     assert db.get_by_path("settings.ini", pair1.pair_id) is not None
     assert db.get_by_path("todo.md", pair2.pair_id) is not None
     db.close()
+
+
+def test_conflict_strategies_keep_local_and_remote(tmp_path: Path) -> None:
+    sync_root = tmp_path / "sync"
+    sync_root.mkdir()
+    file_path = sync_root / "document.txt"
+    file_path.write_text("Local v1", encoding="utf-8")
+
+    db = SyncDatabase(tmp_path / "cache.db")
+    fake_drive = FakeDriveClient()
+    versioning = VersioningEngine(sync_root=sync_root, enabled=False)
+
+    engine = SyncEngine(
+        db=db,
+        drive=fake_drive,  # type: ignore[arg-type]
+        versioning=versioning,
+        sync_root=sync_root,
+    )
+
+    # Initial sync
+    engine.run_sync_pass()
+
+    # Create conflict: modify both local and remote
+    file_path.write_text("Local modified", encoding="utf-8")
+    cached = db.get_by_path("document.txt")
+    assert cached is not None
+    drv_id = cached.drive_id
+    fake_drive.files[drv_id] = RemoteChangeEvent(
+        file_id=drv_id,
+        removed=False,
+        name="document.txt",
+        mime_type="text/plain",
+        parents=(fake_drive.ensure_root_folder(),),
+        modified_time=2000.0,
+        sha256="fake_remote_hash",
+        size=100,
+    )
+    fake_drive.contents[drv_id] = b"Remote modified"
+
+    # Strategy: keep_local
+    db.save_settings({"conflict_strategy": "keep_local"})
+    activities: List[str] = []
+    summary = engine.run_sync_pass(force_full=True, activity_cb=activities.append)
+    assert summary.uploaded == 1
+    assert any("Conflict: preserving local version" in a for a in activities)
+    assert fake_drive.contents[drv_id] == b"Local modified"
+
+    # Next test strategy: keep_remote
+    file_path.write_text("Local modified again", encoding="utf-8")
+    fake_drive.contents[drv_id] = b"Remote wins"
+    fake_drive.files[drv_id] = RemoteChangeEvent(
+        file_id=drv_id,
+        removed=False,
+        name="document.txt",
+        mime_type="text/plain",
+        parents=(fake_drive.ensure_root_folder(),),
+        modified_time=3000.0,
+        sha256="fake_remote_hash_2",
+        size=11,
+    )
+    db.save_settings({"conflict_strategy": "keep_remote"})
+    activities.clear()
+    summary = engine.run_sync_pass(force_full=True, activity_cb=activities.append)
+    assert summary.downloaded == 1
+    assert any("Conflict: accepting remote version" in a for a in activities)
+    assert file_path.read_text(encoding="utf-8") == "Remote wins"
+    db.close()
+
+
+def test_max_file_size_limit(tmp_path: Path) -> None:
+    sync_root = tmp_path / "sync"
+    sync_root.mkdir()
+    big_file = sync_root / "large.iso"
+    big_file.write_bytes(b"0" * (2 * 1024 * 1024))  # 2 MB
+
+    db = SyncDatabase(tmp_path / "cache.db")
+    db.save_settings({"max_file_size_mb": 1})  # 1 MB max
+
+    fake_drive = FakeDriveClient()
+    versioning = VersioningEngine(sync_root=sync_root, enabled=False)
+    engine = SyncEngine(
+        db=db,
+        drive=fake_drive,  # type: ignore[arg-type]
+        versioning=versioning,
+        sync_root=sync_root,
+    )
+
+    activities: List[str] = []
+    summary = engine.run_sync_pass(activity_cb=activities.append)
+    assert summary.uploaded == 0
+    assert any("exceeds 1 MB limit" in a for a in activities)
+    db.close()
+
+
+def test_proxy_and_rate_limits() -> None:
+    import os
+    from src.drive_api import DriveClient
+
+    client = DriveClient()
+    client.apply_network_settings(
+        proxy_mode="manual",
+        proxy_host="127.0.0.1",
+        proxy_port=8888,
+        proxy_user="user",
+        proxy_pass="pass",
+        rate_limit_upload_kbps=512,
+        rate_limit_download_kbps=1024,
+    )
+    assert client.rate_limit_upload_kbps == 512
+    assert client.rate_limit_download_kbps == 1024
+    assert os.environ.get("http_proxy") == "http://user:pass@127.0.0.1:8888"
+
+    client.apply_network_settings(proxy_mode="none")
+    assert os.environ.get("no_proxy") == "*"
+
+    client.apply_network_settings(proxy_mode="system")
+    assert "no_proxy" not in os.environ
+
+
+def test_autostart_logic(tmp_path: Path, monkeypatch=None) -> None:
+    import src.autostart as auto
+
+    old_file = auto.AUTOSTART_FILE
+    old_dir = auto.AUTOSTART_DIR
+    try:
+        auto.AUTOSTART_DIR = tmp_path / "autostart"
+        auto.AUTOSTART_FILE = auto.AUTOSTART_DIR / "bearsync.desktop"
+
+        assert not auto.is_autostart_enabled()
+        assert auto.set_autostart_enabled(True)
+        assert auto.is_autostart_enabled()
+        assert auto.AUTOSTART_FILE.exists()
+        content = auto.AUTOSTART_FILE.read_text(encoding="utf-8")
+        assert "Type=Application" in content
+        assert "BearSync" in content
+
+        assert auto.set_autostart_enabled(False)
+        assert not auto.is_autostart_enabled()
+        assert not auto.AUTOSTART_FILE.exists()
+    finally:
+        auto.AUTOSTART_FILE = old_file
+        auto.AUTOSTART_DIR = old_dir
+
+

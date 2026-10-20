@@ -70,6 +70,8 @@ class SyncEngine:
         self.sync_root = Path(sync_root).resolve()
         self.suppress_watcher_cb = suppress_watcher_cb
         self._lock = threading.Lock()
+        self.conflict_strategy: str = "keep_both"
+        self.max_file_size_mb: int = 0
 
     def _suppress(self, rel_path: str, active: bool, pair_id: str = "default") -> None:
         if self.suppress_watcher_cb is not None:
@@ -122,6 +124,10 @@ class SyncEngine:
     ) -> SyncSummary:
         """Execute a thread-safe bi-directional synchronization cycle across all (or one) SyncPairs."""
         with self._lock:
+            settings = self.db.get_settings()
+            self.conflict_strategy = str(settings.get("conflict_strategy", "keep_both"))
+            self.max_file_size_mb = int(settings.get("max_file_size_mb", 0))
+
             total_summary = SyncSummary()
             pairs = self.get_effective_sync_pairs()
 
@@ -391,18 +397,45 @@ class SyncEngine:
                     activity_cb,
                 )
             elif local_changed and remote_changed:
-                self._resolve_conflict(
-                    pair_id,
-                    remote_label,
-                    local_root,
-                    versioning,
-                    root_id,
-                    rel_path,
-                    local_abs,
-                    remote,
-                    summary,
-                    activity_cb,
-                )
+                if self.conflict_strategy == "keep_local":
+                    activity_cb(f"⚡ Conflict: preserving local version of {rel_path}")
+                    self._upload_local_file(
+                        pair_id=pair_id,
+                        remote_label=remote_label,
+                        local_root=local_root,
+                        root_id=root_id,
+                        rel_path=rel_path,
+                        local_abs=local_abs,
+                        local_sha=local_sha,
+                        existing_drive_id=remote.file_id,
+                        summary=summary,
+                        activity_cb=activity_cb,
+                    )
+                elif self.conflict_strategy == "keep_remote":
+                    activity_cb(f"⚡ Conflict: accepting remote version of {rel_path}")
+                    self._download_remote_file(
+                        pair_id=pair_id,
+                        remote_label=remote_label,
+                        local_root=local_root,
+                        versioning=versioning,
+                        rel_path=rel_path,
+                        remote=remote,
+                        summary=summary,
+                        activity_cb=activity_cb,
+                    )
+                else:
+                    self._resolve_conflict(
+                        pair_id,
+                        remote_label,
+                        local_root,
+                        versioning,
+                        root_id,
+                        rel_path,
+                        local_abs,
+                        remote,
+                        summary,
+                        activity_cb,
+                    )
             return
 
         # Case 2: Only local exists
@@ -713,6 +746,18 @@ class SyncEngine:
         summary: SyncSummary,
         activity_cb: Callable[[str], None],
     ) -> None:
+        if self.max_file_size_mb > 0:
+            try:
+                size_mb = local_abs.stat().st_size / (1024 * 1024)
+                if size_mb > self.max_file_size_mb:
+                    activity_cb(
+                        f"⏭️ Skipping {rel_path} ({size_mb:.1f} MB exceeds {self.max_file_size_mb} MB limit)"
+                    )
+                    logger.info("Skipped upload of '%s' (exceeds %d MB limit)", rel_path, self.max_file_size_mb)
+                    return
+            except OSError:
+                pass
+
         parent_id = self._ensure_remote_parent_dirs(
             pair_id, local_root, root_id, rel_path
         )
@@ -753,6 +798,15 @@ class SyncEngine:
         summary: SyncSummary,
         activity_cb: Callable[[str], None],
     ) -> None:
+        if self.max_file_size_mb > 0 and remote.size > 0:
+            size_mb = remote.size / (1024 * 1024)
+            if size_mb > self.max_file_size_mb:
+                activity_cb(
+                    f"⏭️ Skipping download of {rel_path} ({size_mb:.1f} MB exceeds {self.max_file_size_mb} MB limit)"
+                )
+                logger.info("Skipped download of '%s' (exceeds %d MB limit)", rel_path, self.max_file_size_mb)
+                return
+
         dest_abs = local_root / rel_path
         self._suppress(rel_path, True, pair_id)
         try:

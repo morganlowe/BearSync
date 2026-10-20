@@ -7,6 +7,7 @@ import logging
 import mimetypes
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,7 +21,7 @@ SCOPES = ["https://www.googleapis.com/auth/drive"]
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 GOOGLE_APPS_MIME_PREFIX = "application/vnd.google-apps."
 DRIVE_FILE_FIELDS = (
-    "id, name, mimeType, parents, trashed, modifiedTime, sha256Checksum, md5Checksum, appProperties"
+    "id, name, mimeType, parents, trashed, modifiedTime, sha256Checksum, md5Checksum, size, appProperties"
 )
 
 # Built-in BearSync Desktop OAuth2 client configuration enabling one-click browser sign-in
@@ -57,6 +58,7 @@ class RemoteChangeEvent:
     trashed: bool = False
     modified_time: float = 0.0
     sha256: str = ""
+    size: int = 0
 
 
 def parse_rfc3339_timestamp(iso_str: Optional[str]) -> float:
@@ -84,6 +86,8 @@ class DriveClient:
         credentials_path: Optional[Path] = None,
         token_path: Optional[Path] = None,
         service: Optional[Any] = None,
+        rate_limit_upload_kbps: int = 0,
+        rate_limit_download_kbps: int = 0,
     ) -> None:
         self.config_dir = Path(config_dir) if config_dir else get_default_config_dir()
         self.config_dir.mkdir(parents=True, exist_ok=True)
@@ -96,6 +100,43 @@ class DriveClient:
             Path(token_path) if token_path else (self.config_dir / "token.json")
         )
         self._service = service
+        self.rate_limit_upload_kbps = max(0, int(rate_limit_upload_kbps))
+        self.rate_limit_download_kbps = max(0, int(rate_limit_download_kbps))
+
+    def apply_network_settings(
+        self,
+        proxy_mode: str = "system",
+        proxy_host: str = "",
+        proxy_port: int = 8080,
+        proxy_user: str = "",
+        proxy_pass: str = "",
+        rate_limit_upload_kbps: int = 0,
+        rate_limit_download_kbps: int = 0,
+    ) -> None:
+        """Apply proxy environment variables and rate limits for Drive API transfers."""
+        self.rate_limit_upload_kbps = max(0, int(rate_limit_upload_kbps))
+        self.rate_limit_download_kbps = max(0, int(rate_limit_download_kbps))
+
+        if proxy_mode == "none":
+            os.environ["no_proxy"] = "*"
+            os.environ.pop("http_proxy", None)
+            os.environ.pop("https_proxy", None)
+            os.environ.pop("all_proxy", None)
+            os.environ.pop("HTTP_PROXY", None)
+            os.environ.pop("HTTPS_PROXY", None)
+            os.environ.pop("ALL_PROXY", None)
+        elif proxy_mode == "manual" and proxy_host.strip():
+            auth = f"{proxy_user}:{proxy_pass}@" if proxy_user else ""
+            url = f"http://{auth}{proxy_host.strip()}:{proxy_port}"
+            os.environ["http_proxy"] = url
+            os.environ["https_proxy"] = url
+            os.environ["all_proxy"] = url
+            os.environ.pop("no_proxy", None)
+            os.environ.pop("NO_PROXY", None)
+        else:
+            # "system" - clean up any forced overrides so OS/environment defaults take precedence
+            os.environ.pop("no_proxy", None)
+            os.environ.pop("NO_PROXY", None)
 
     # --- OAuth2 & Account Management ---
 
@@ -343,30 +384,55 @@ class DriveClient:
                 "bearsync_mtime": f"{mtime:.6f}",
             },
         }
-        media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=True)
+        chunk_size = 256 * 1024 if self.rate_limit_upload_kbps > 0 else -1
+        media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=True, chunksize=chunk_size)
 
-        if existing_drive_id:
-            result = (
-                self.service.files()
-                .update(
+        if self.rate_limit_upload_kbps > 0:
+            if existing_drive_id:
+                request = self.service.files().update(
                     fileId=existing_drive_id,
                     body=body,
                     media_body=media,
                     fields=DRIVE_FILE_FIELDS,
                 )
-                .execute()
-            )
-        else:
-            body["parents"] = [parent_id]
-            result = (
-                self.service.files()
-                .create(
+            else:
+                body["parents"] = [parent_id]
+                request = self.service.files().create(
                     body=body,
                     media_body=media,
                     fields=DRIVE_FILE_FIELDS,
                 )
-                .execute()
-            )
+            result = None
+            while result is None:
+                t0 = time.time()
+                status, result = request.next_chunk()
+                expected = (256 * 1024) / (self.rate_limit_upload_kbps * 1024)
+                elapsed = time.time() - t0
+                if expected > elapsed:
+                    time.sleep(expected - elapsed)
+        else:
+            if existing_drive_id:
+                result = (
+                    self.service.files()
+                    .update(
+                        fileId=existing_drive_id,
+                        body=body,
+                        media_body=media,
+                        fields=DRIVE_FILE_FIELDS,
+                    )
+                    .execute()
+                )
+            else:
+                body["parents"] = [parent_id]
+                result = (
+                    self.service.files()
+                    .create(
+                        body=body,
+                        media_body=media,
+                        fields=DRIVE_FILE_FIELDS,
+                    )
+                    .execute()
+                )
 
         drive_id = str(result["id"])
         remote_mtime = parse_rfc3339_timestamp(result.get("modifiedTime")) or mtime
@@ -385,10 +451,17 @@ class DriveClient:
         tmp_path = Path(tmp_name)
         try:
             with os.fdopen(fd, "wb") as handle:
-                downloader = MediaIoBaseDownload(handle, request, chunksize=4 * 1024 * 1024)
+                chunksize = 256 * 1024 if self.rate_limit_download_kbps > 0 else (4 * 1024 * 1024)
+                downloader = MediaIoBaseDownload(handle, request, chunksize=chunksize)
                 done = False
                 while not done:
+                    t0 = time.time()
                     _, done = downloader.next_chunk()
+                    if self.rate_limit_download_kbps > 0 and not done:
+                        expected = chunksize / (self.rate_limit_download_kbps * 1024)
+                        elapsed = time.time() - t0
+                        if expected > elapsed:
+                            time.sleep(expected - elapsed)
 
             if remote_mtime and remote_mtime > 0:
                 os.utime(tmp_path, (remote_mtime, remote_mtime))
@@ -465,6 +538,7 @@ class DriveClient:
                         trashed=bool(file_meta.get("trashed", False)),
                         modified_time=parse_rfc3339_timestamp(file_meta.get("modifiedTime")),
                         sha256=sha256,
+                        size=int(file_meta.get("size") or 0),
                     )
                 )
 
@@ -522,6 +596,7 @@ class DriveClient:
                         trashed=False,
                         modified_time=parse_rfc3339_timestamp(file_meta.get("modifiedTime")),
                         sha256=sha256,
+                        size=int(file_meta.get("size") or 0),
                     )
                     result[rel_path] = event
 

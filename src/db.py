@@ -390,6 +390,17 @@ class SyncDatabase:
             "account_name": "",
             "poll_interval_seconds": 60,
             "debounce_seconds": 3.0,
+            "rate_limit_upload_kbps": 0,
+            "rate_limit_download_kbps": 0,
+            "proxy_mode": "system",  # "system", "none", "manual"
+            "proxy_host": "",
+            "proxy_port": 8080,
+            "proxy_user": "",
+            "proxy_pass": "",
+            "start_minimized": False,
+            "autostart": True,
+            "max_file_size_mb": 0,  # 0 = unlimited
+            "conflict_strategy": "keep_both",  # "keep_both", "keep_local", "keep_remote"
             "versioning_enabled": False,
             "versioning_mode": "versions_subdir",
             "versioning_paths": ["*"],
