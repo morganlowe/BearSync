@@ -1,0 +1,17 @@
+#!/usr/bin/make -f
+
+export PYBUILD_NAME=gdrive-sync
+
+%:
+	dh $@ -- with python3 --buildsystem=pybuild
+
+override_dh_auto_install:
+	dh_auto_install
+	install -Dm644 gdrive-sync.desktop \
+		debian/gdrive-sync/usr/share/applications/org.bearsync.gdrive-sync.desktop
+	install -Dm644 systemd/gdrive-sync.service \
+		debian/gdrive-sync/usr/lib/systemd/user/gdrive-sync.service
+	install -Dm644 assets/gdrive-sync.svg \
+		debian/gdrive-sync/usr/share/icons/hicolor/scalable/apps/gdrive-sync.svg
+	install -dm755 debian/gdrive-sync/usr/share/gdrive-sync/assets
+	install -Dm644 assets/*.svg assets/*.png debian/gdrive-sync/usr/share/gdrive-sync/assets/

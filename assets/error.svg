@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
+  <!-- Cloud base -->
+  <path fill="#3daee9" d="M11 4C8.05 4 5.61 6.13 5.1 8.95C3.34 9.38 2 10.97 2 12.88C2 15.15 3.85 17 6.13 17H15.5C17.99 17 20 14.99 20 12.5C20 10.17 18.21 8.26 15.93 8.03C15.15 5.68 12.97 4 11 4Z"/>
+  <!-- Error Badge -->
+  <circle cx="16.5" cy="15.5" r="4.5" fill="#da4453"/>
+  <rect x="15.9" y="12.9" width="1.2" height="3.2" rx="0.5" fill="#ffffff"/>
+  <circle cx="16.5" cy="17.5" r="0.7" fill="#ffffff"/>
+</svg>

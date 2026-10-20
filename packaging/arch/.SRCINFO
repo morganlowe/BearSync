@@ -1,0 +1,25 @@
+pkgbase = gdrive-sync
+	pkgdesc = Lightweight native Wayland & KDE Plasma 6 bi-directional Google Drive sync client
+	pkgver = 1.0.0
+	pkgrel = 1
+	url = https://github.com/morganlowe/BearSync
+	arch = any
+	license = GPL-3.0-or-later
+	makedepends = python-build
+	makedepends = python-installer
+	makedepends = python-wheel
+	makedepends = python-setuptools
+	depends = python
+	depends = python-pyqt6
+	depends = qt6-wayland
+	depends = qt6-svg
+	depends = python-watchdog
+	depends = python-google-api-python-client
+	depends = python-google-auth
+	depends = python-google-auth-oauthlib
+	depends = python-google-auth-httplib2
+	optdepends = xdg-desktop-portal-kde: Native KDE Plasma 6 dark/light & accent color scheme tracking
+	source = gdrive-sync-1.0.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = gdrive-sync

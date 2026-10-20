@@ -1,0 +1,28 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=BearSync (Google Drive)
+GenericName=Cloud Storage Sync Client
+Comment=Lightweight native Wayland & KDE Plasma bi-directional Google Drive sync client
+Exec=gdrive-sync
+Icon=gdrive-sync
+Terminal=false
+Categories=Network;FileTransfer;Utility;Qt;KDE;
+Keywords=Google;Drive;Cloud;Sync;Backup;Wayland;Plasma;
+StartupNotify=true
+StartupWMClass=org.bearsync.gdrive-sync
+X-KDE-StartupNotify=true
+X-GNOME-UsesNotifications=true
+Actions=SyncNow;OpenFolder;Preferences;
+
+[Desktop Action SyncNow]
+Name=Sync Now
+Exec=gdrive-sync --sync-now
+
+[Desktop Action OpenFolder]
+Name=Open Sync Folder
+Exec=gdrive-sync --open-folder
+
+[Desktop Action Preferences]
+Name=Preferences
+Exec=gdrive-sync --preferences

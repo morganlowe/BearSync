@@ -1,0 +1,25 @@
+[Unit]
+Description=BearSync - Native Wayland & KDE Plasma Google Drive Bi-Directional Sync Client
+Documentation=https://github.com/morganlowe/BearSync
+After=graphical-session.target network-online.target dbus.socket
+Wants=network-online.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+Environment="QT_QPA_PLATFORM=wayland;xcb"
+Environment="QT_WAYLAND_RECONNECT=1"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/usr/bin/env gdrive-sync --minimized
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+
+# Hardening & Sandboxing suitable for user session daemon
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=%h
+
+[Install]
+WantedBy=graphical-session.target

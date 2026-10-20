@@ -1,0 +1,39 @@
+Source: gdrive-sync
+Section: net
+Priority: optional
+Maintainer: BearSync Contributors <maintainers@bearsync.org>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-python,
+ python3-all,
+ python3-setuptools,
+ pybuild-plugin-pyproject
+Standards-Version: 4.6.2
+Homepage: https://github.com/morganlowe/BearSync
+Rules-Requires-Root: no
+
+Package: gdrive-sync
+Architecture: all
+Depends:
+ ${python3:Depends},
+ ${misc:Depends},
+ python3-pyqt6,
+ qt6-wayland,
+ libqt6svg6,
+ python3-watchdog,
+ python3-googleapi,
+ python3-google-auth,
+ python3-google-auth-oauthlib,
+ python3-google-auth-httplib2
+Recommends:
+ xdg-desktop-portal-kde
+Description: Native Wayland & KDE Plasma 6 bi-directional Google Drive sync client
+ BearSync (gdrive-sync) is a lightweight, native Linux bi-directional Google
+ Drive synchronization client designed for Wayland and KDE Plasma 6.
+ .
+ Features include:
+  - StatusNotifierItem (SNI) system tray integration with scalable SVG badges
+  - Native QPalette & FreeDesktop Portal dynamic dark/light & accent theming
+  - Linux inotify monitoring with a 3-second write debounce
+  - Differential remote polling via Google Drive API v3 changes.list
+  - Automatic conflict preservation and custom timestamp file versioning

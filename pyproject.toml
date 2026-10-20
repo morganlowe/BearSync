@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gdrive-sync"
+version = "1.0.0"
+description = "Lightweight, native Wayland & KDE Plasma 6 bi-directional Google Drive sync client for Arch Linux / CachyOS"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.10"
+authors = [
+    { name = "BearSync Contributors" }
+]
+keywords = ["google-drive", "sync", "wayland", "kde", "plasma", "pyqt6", "linux", "archlinux", "cachyos"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Desktop Environment :: K Desktop Environment (KDE)",
+    "Topic :: System :: Archiving :: Mirroring",
+]
+dependencies = [
+    "PyQt6>=6.6.0",
+    "watchdog>=4.0.0",
+    "google-api-python-client>=2.120.0",
+    "google-auth>=2.28.0",
+    "google-auth-oauthlib>=1.2.0",
+    "google-auth-httplib2>=0.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=24.0.0",
+    "flake8>=7.0.0",
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+bearsync = "src.main:main"
+gdrive-sync = "src.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311", "py312"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
